@@ -13,9 +13,20 @@ CS Route Control is a native Windows utility designed to manage Counter-Strike 2
 
 The following instructions demonstrate the build process using the MSYS2 (UCRT64) environment on Windows.
 
+
+
 ### Environment Setup (MSYS2)
 
 Install the necessary toolchain and Qt6 libraries:
 
 ```bash
 pacman -S mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-qt6-base
+```
+
+### Build
+
+```bash
+mkdir build && cd build
+cmake .. -G "Ninja" -DCMAKE_BUILD_TYPE=Release
+cmake --build .
+```
