@@ -13,6 +13,7 @@
 #include <comdef.h>
 #include <netfw.h>
 #include <windows.h>
+#include <winsock2.h>
 
 
 class FirewallManager {
@@ -31,8 +32,10 @@ public:
   }
 
   static bool addBlockRule(const std::string &ip) {
-    ComScope com;
-    if (!com.ok())
+    if (inet_addr(ip.c_str()) == INADDR_NONE)
+      return false;
+
+    if (!getComScope().ok())
       return false;
 
     ComPtr<INetFwPolicy2> policy;
@@ -62,8 +65,7 @@ public:
   }
 
   static bool removeBlockRule(const std::string &ip) {
-    ComScope com;
-    if (!com.ok())
+    if (!getComScope().ok())
       return false;
 
     ComPtr<INetFwPolicy2> policy;
@@ -79,8 +81,7 @@ public:
   }
 
   static bool removeAllRules() {
-    ComScope com;
-    if (!com.ok())
+    if (!getComScope().ok())
       return false;
 
     ComPtr<INetFwPolicy2> policy;
@@ -151,6 +152,11 @@ private:
     bool m_needUninit = false;
   };
 
+  static ComScope &getComScope() {
+    thread_local ComScope instance;
+    return instance;
+  }
+
   template <typename T> struct ComPtr {
     T *p = nullptr;
     ~ComPtr() {
@@ -169,6 +175,10 @@ private:
   }
 
   static std::wstring toWide(const std::string &s) {
-    return std::wstring(s.begin(), s.end());
+    if (s.empty()) return {};
+    int size = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    std::wstring result(size - 1, 0);
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, result.data(), size);
+    return result;
   }
 };
