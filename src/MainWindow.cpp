@@ -278,109 +278,61 @@ void MainWindow::togglePause() {
 }
 
 void MainWindow::loadJson() {
-  if (m_isDownloading)
-    return;
+    if (m_isDownloading) return;
+    m_isDownloading = true;
+    showStatus("Fetching server list...");
 
-  m_isDownloading = true;
-  m_statusLabel->setText("Downloading server list from Steam...");
+    QNetworkRequest req(QUrl(
+        "https://api.steampowered.com/ISteamApps/GetSDRConfig/v1/?appid=730"
+    ));
+    req.setHeader(QNetworkRequest::UserAgentHeader, "CS Route Control");
 
-  QNetworkRequest request(QUrl(
-      "https://api.steampowered.com/ISteamApps/GetSDRConfig/v1/?appid=730"));
-  request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
-                       QNetworkRequest::NoLessSafeRedirectPolicy);
-
-  QNetworkReply *reply = m_networkManager->get(request);
-
-  connect(reply, &QNetworkReply::finished, this, [this, reply]() {
-    reply->deleteLater();
-
-    if (reply->error() != QNetworkReply::NoError) {
-      QMessageBox::warning(this, "Network Error",
-                           "Failed to fetch server list from Steam:\n" +
-                               reply->errorString());
-      m_isDownloading = false;
-      showStatus("Network error — could not load servers.");
-      return;
-    }
-
-    parseServerList(reply->readAll());
-  });
+    QNetworkReply *reply = m_networkManager->get(req);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        m_isDownloading = false;
+        if (reply->error() != QNetworkReply::NoError) {
+            showStatus("Network error: " + reply->errorString());
+        } else {
+            parseServerList(reply->readAll());
+        }
+        reply->deleteLater();
+    });
 }
 
 void MainWindow::parseServerList(const QByteArray &data) {
-  QJsonParseError parseError;
-  const QJsonDocument doc = QJsonDocument::fromJson(data, &parseError);
+    QJsonDocument doc = QJsonDocument::fromJson(data);
+    if (doc.isNull()) {
+        showStatus("Failed to parse JSON");
+        return;
+    }
 
-  if (parseError.error != QJsonParseError::NoError) {
-    QMessageBox::warning(this, "Parse Error",
-                         "Could not parse Steam API response:\n" +
-                             parseError.errorString());
+    QJsonObject pops = doc.object().value("pops").toObject();
+    m_regions.clear();
+
+    for (const QString &code : pops.keys()) {
+        QJsonObject pop = pops.value(code).toObject();
+        QJsonArray relays = pop.value("relays").toArray();
+        if (relays.isEmpty()) continue;
+
+        ServerRegion region;
+        region.code = code.toStdString();
+        region.name = pop.value("desc").toString(code).toStdString();
+
+        for (const QJsonValue &relay : relays) {
+            QString ip = relay.toObject().value("ipv4").toString();
+            if (!ip.isEmpty())
+                region.ips.push_back(ip.toStdString());
+        }
+
+        if (!region.ips.empty())
+            m_regions[region.code] = std::move(region);
+    }
+
+    populateTable();
+    refreshPings();
     m_isDownloading = false;
-    showStatus("JSON parse error.");
-    return;
-  }
 
-  const QJsonObject root = doc.object();
-  if (!root.contains("pops")) {
-    QMessageBox::warning(
-        this, "API Error",
-        "Unexpected response from Steam API: missing 'pops' field.");
-    m_isDownloading = false;
-    showStatus("API format error.");
-    return;
-  }
-
-  static const QStringList kAllowedCities = {
-      "Amsterdam", "Falkenstein",  "Frankfurt", "Helsinki",    "London",
-      "Madrid",    "Paris",        "Stockholm", "Vienna",      "Warsaw",
-      "Atlanta",   "Chicago",      "Dallas",    "Los Angeles", "Seattle",
-      "Sterling",  "Buenos Aires", "Lima",      "Santiago",    "Sao Paulo",
-      "Chennai",   "Mumbai",       "Dubai",     "Hong Kong",   "Seoul",
-      "Singapore", "Tokyo",        "Beijing",   "Chengdu",     "Guangdong",
-      "Shanghai",  "Johannesburg", "Sydney"};
-
-  m_regions.clear();
-
-  const QJsonObject pops = root.value("pops").toObject();
-  for (auto it = pops.constBegin(); it != pops.constEnd(); ++it) {
-    const QJsonObject pop = it.value().toObject();
-    const QString rawName = pop.value("desc").toString(it.key());
-
-    QString cityName;
-    for (const QString &city : kAllowedCities) {
-      if (rawName.contains(city, Qt::CaseInsensitive)) {
-        cityName = city;
-        break;
-      }
-    }
-    if (cityName.isEmpty())
-      continue;
-
-    const std::string key = cityName.toStdString();
-
-    if (m_regions.find(key) == m_regions.end()) {
-      ServerRegion &r = m_regions[key];
-      r.code = key;
-      r.name = key;
-    }
-
-    const QJsonArray relays = pop.value("relays").toArray();
-    for (const QJsonValue &relay : relays) {
-      const QString ipv4 = relay.toObject().value("ipv4").toString();
-      if (!ipv4.isEmpty())
-        m_regions[key].ips.push_back(ipv4.toStdString());
-    }
-  }
-
-  for (auto mit = m_regions.begin(); mit != m_regions.end();)
-    mit = mit->second.ips.empty() ? m_regions.erase(mit) : ++mit;
-
-  populateTable();
-  refreshPings();
-
-  m_isDownloading = false;
-  m_lastActionText.clear();
-  restoreMonitoringStatus();
+    showStatus(QString("Loaded %1 regions").arg(m_regions.size()));
 }
 
 void MainWindow::populateTable() {
@@ -493,17 +445,25 @@ void MainWindow::refreshPings() {
     QThreadPool::globalInstance()->start(
         [this, version, codeCopy, regionCopy]() {
           int rtt = -1;
+          int jitter = 0;
           for (const auto &ip : regionCopy.ips) {
-            rtt = PingManager::ping(ip);
+            PingManager::PingResult res = PingManager::ping(ip, 4, 1000);
+            rtt = res.avg;
+            jitter = res.jitter;
             if (rtt >= 0 && rtt < 2000)
               break;
           }
 
           QMetaObject::invokeMethod(
               this,
-              [this, version, codeCopy, rtt]() {
-                if (version == getPingVersion())
+              [this, version, codeCopy, rtt, jitter]() {
+                if (version == getPingVersion()) {
+                  auto it = m_regions.find(codeCopy);
+                  if (it != m_regions.end()) {
+                    it->second.jitter = jitter;
+                  }
                   updatePingDisplay(codeCopy, rtt);
+                }
                 onPingFinished();
               },
               Qt::QueuedConnection);
@@ -517,10 +477,7 @@ void MainWindow::updatePingDisplay(const std::string &code, int ping) {
     return;
 
   ServerRegion &region = it->second;
-  const int oldPing = region.ping;
-
   region.ping = ping;
-  region.jitter = (oldPing >= 0 && ping >= 0) ? std::abs(ping - oldPing) : 0;
 
   const QString regionName = QString::fromStdString(region.name);
   for (int row = 0; row < m_table->rowCount(); ++row) {
@@ -534,7 +491,7 @@ void MainWindow::updatePingDisplay(const std::string &code, int ping) {
     }
 
     if (auto *jitterItem = m_table->item(row, 2)) {
-      if (ping >= 0 && oldPing >= 0) {
+      if (ping >= 0) {
         jitterItem->setText(QString::number(region.jitter) + " ms");
         jitterItem->setForeground(jitterColor(region.jitter));
       } else {
