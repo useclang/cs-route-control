@@ -1,8 +1,8 @@
 #pragma once
 
+#include <cmath>
 #include <string>
 #include <vector>
-#include <cmath>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -13,8 +13,8 @@
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include <iphlpapi.h>
 #include <ipexport.h>
+#include <iphlpapi.h>
 #include <icmpapi.h>
 
 class PingManager {
@@ -24,66 +24,59 @@ public:
         int jitter = 0;
     };
 
-    static PingResult ping(const std::string &ip, int samples = 4, DWORD timeoutMs = 1000) {
+    static PingResult ping(const std::string &ip, int samples = 4, DWORD timeoutMs = 500) {
+        HANDLE hIcmp = IcmpCreateFile();
+        if (hIcmp == INVALID_HANDLE_VALUE) return {-1, 0};
+
         std::vector<int> results;
         results.reserve(samples);
 
-        for (int i = 0; i < samples; ++i) {
-            int r = pingOnce(ip, timeoutMs);
-            if (r >= 0) {
-                results.push_back(r);
+        IN_ADDR addr{};
+        if (inet_pton(AF_INET, ip.c_str(), &addr) == 1) {
+            for (int i = 0; i < samples; ++i) {
+                int r = pingOnce(hIcmp, addr, timeoutMs);
+                if (r >= 0) results.push_back(r);
             }
         }
+        IcmpCloseHandle(hIcmp);
 
-        if (results.empty()) {
-            return {-1, 0};
-        }
+        if (results.empty()) return {-1, 0};
 
         int sum = 0;
+        int minRtt = results[0];
+        int maxRtt = results[0];
+
         for (int v : results) {
             sum += v;
+            if (v < minRtt) minRtt = v;
+            if (v > maxRtt) maxRtt = v;
         }
-        int avg = sum / static_cast<int>(results.size());
 
-        int jitterSum = 0;
-        for (int v : results) {
-            jitterSum += std::abs(v - avg);
-        }
-        int jitter = jitterSum / static_cast<int>(results.size());
-
-        return {avg, jitter};
+        return {sum / static_cast<int>(results.size()), maxRtt - minRtt};
     }
 
 private:
-    static int pingOnce(const std::string &ip, DWORD timeoutMs = 1000) {
-        HANDLE hIcmp = IcmpCreateFile();
-        if (hIcmp == INVALID_HANDLE_VALUE)
-            return -1;
-
-        const IPAddr addr = inet_addr(ip.c_str());
-        if (addr == INADDR_NONE) {
-            IcmpCloseHandle(hIcmp);
-            return -1;
-        }
-
+    static int pingOnce(HANDLE hIcmp, IN_ADDR addr, DWORD timeoutMs) {
         constexpr char sendData[] = "CSR_Ping";
         const DWORD replySize = sizeof(ICMP_ECHO_REPLY) + sizeof(sendData) + 8;
         std::vector<char> replyBuffer(replySize);
 
-        const DWORD result = IcmpSendEcho(
-            hIcmp, addr, const_cast<char *>(sendData),
-            static_cast<WORD>(sizeof(sendData)), nullptr,
-            replyBuffer.data(), replySize, timeoutMs);
+        DWORD result = IcmpSendEcho(
+            hIcmp,
+            addr.S_un.S_addr,
+            const_cast<char *>(sendData),
+            static_cast<WORD>(sizeof(sendData)),
+            nullptr,
+            replyBuffer.data(),
+            replySize,
+            timeoutMs);
 
-        int rtt = -1;
         if (result > 0) {
-            const auto *pReply =
-                reinterpret_cast<PICMP_ECHO_REPLY>(replyBuffer.data());
+            auto *pReply = reinterpret_cast<PICMP_ECHO_REPLY>(replyBuffer.data());
             if (pReply->Status == IP_SUCCESS)
-                rtt = static_cast<int>(pReply->RoundTripTime);
+                return static_cast<int>(pReply->RoundTripTime);
         }
 
-        IcmpCloseHandle(hIcmp);
-        return rtt;
+        return -1;
     }
 };
