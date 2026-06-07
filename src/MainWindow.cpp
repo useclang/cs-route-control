@@ -19,6 +19,51 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
+#include <QStyledItemDelegate>
+
+class CheckBoxCenterDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    void paint(QPainter *p, const QStyleOptionViewItem &option,
+               const QModelIndex &index) const override
+    {
+        QStyleOptionButton opt;
+        opt.state = QStyle::State_Enabled;
+        opt.state |= (index.data(Qt::CheckStateRole).toInt() == Qt::Checked)
+                     ? QStyle::State_On : QStyle::State_Off;
+
+        const int size = 16;
+        opt.rect = QRect(
+            option.rect.x() + (option.rect.width()  - size) / 2,
+            option.rect.y() + (option.rect.height() - size) / 2,
+            size, size);
+
+        QApplication::style()->drawControl(QStyle::CE_CheckBox, &opt, p);
+    }
+
+    bool editorEvent(QEvent *event, QAbstractItemModel *model,
+                     const QStyleOptionViewItem &option,
+                     const QModelIndex &index) override
+    {
+        if (!(index.flags() & Qt::ItemIsUserCheckable))
+            return false;
+
+        if (event->type() == QEvent::MouseButtonRelease) {
+            auto *me = static_cast<QMouseEvent *>(event);
+            if (option.rect.contains(me->pos()) && me->button() == Qt::LeftButton) {
+                const Qt::CheckState current =
+                    static_cast<Qt::CheckState>(index.data(Qt::CheckStateRole).toInt());
+                model->setData(index,
+                    current == Qt::Checked ? Qt::Unchecked : Qt::Checked,
+                    Qt::CheckStateRole);
+                return true;
+            }
+        }
+        return false;
+    }
+};
+
 static constexpr int kWindowW          = 350;
 static constexpr int kWindowH          = 420;
 static constexpr int kNetworkTimeoutMs = 10000;
@@ -184,6 +229,7 @@ void MainWindow::setupUI() {
     m_tableView->setColumnWidth(RegionTableModel::ColPing,   55);
     m_tableView->setColumnWidth(RegionTableModel::ColJitter, 60);
     m_tableView->setColumnWidth(RegionTableModel::ColBlock,  45);
+    m_tableView->setItemDelegateForColumn(RegionTableModel::ColBlock, new CheckBoxCenterDelegate(m_tableView));
 
     m_tableView->setShowGrid(false);
     m_tableView->setAlternatingRowColors(true);
