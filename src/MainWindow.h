@@ -7,6 +7,7 @@
 #include <QPoint>
 #include <QPushButton>
 #include <QTableWidget>
+#include <QThreadPool>
 #include <QTimer>
 
 #include <atomic>
@@ -15,73 +16,79 @@
 #include <vector>
 
 struct ServerRegion {
-  std::string code;
-  std::string name;
-  std::vector<std::string> ips;
-  int ping = -1;
-  int jitter = 0;
+    std::string              code;
+    std::string              name;
+    std::vector<std::string> ips;
+    int                      ping   = -1;
+    int                      jitter = 0;
 };
 
 class MainWindow : public QMainWindow {
-  Q_OBJECT
+    Q_OBJECT
 
 public:
-  explicit MainWindow(QWidget *parent = nullptr);
-  ~MainWindow() override;
+    explicit MainWindow(QWidget *parent = nullptr);
+    ~MainWindow() override;
 
-  int getPingVersion() const {
-    return m_pingVersion.load(std::memory_order_relaxed);
-  }
+    int getPingVersion() const {
+        return m_pingVersion.load(std::memory_order_relaxed);
+    }
 
 public slots:
-  void updatePingDisplay(const std::string &code, int ping);
-  void onPingFinished();
+    void updatePingDisplay(const std::string &code, int ping);
+    void onPingFinished(int version);
 
 protected:
-  void mousePressEvent(QMouseEvent *event) override;
-  void mouseMoveEvent(QMouseEvent *event) override;
-  void mouseReleaseEvent(QMouseEvent *event) override;
+    void mousePressEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
 
 private slots:
-  void loadJson();
-  void refreshPings();
-  void resetFilter();
-  void togglePause();
+    void loadJson();
+    void refreshPings();
+    void resetFilter();
+    void togglePause();
 
 private:
-  void setupUI();
-  void populateTable();
-  void clearTable();
-  void sortTableByPing();
+    void setupUI();
+    void populateTable();
+    void clearTable();
+    void sortTableByPing();
 
-  void parseServerList(const QByteArray &data);
+    void parseServerList(const QByteArray &data);
 
-  void showStatus(const QString &msg, int clearAfterMs = 5000);
-  void restoreMonitoringStatus();
+    void showStatus(const QString &msg, int clearAfterMs = 5000);
+    void restoreMonitoringStatus();
 
-  bool ensureAdmin();
+    bool ensureAdmin();
 
-  QTableWidget *m_table = nullptr;
-  QPushButton *m_loadButton = nullptr;
-  QPushButton *m_resetButton = nullptr;
-  QPushButton *m_pauseButton = nullptr;
-  QLabel *m_statusLabel = nullptr;
+    QTableWidget *m_table       = nullptr;
+    QPushButton  *m_loadButton  = nullptr;
+    QPushButton  *m_resetButton = nullptr;
+    QPushButton  *m_pauseButton = nullptr;
+    QLabel       *m_statusLabel = nullptr;
 
-  QTimer *m_pingTimer = nullptr;
-  QTimer *m_restoreTimer = nullptr;
-  QTimer *m_blinkTimer = nullptr;
+    QTimer *m_pingTimer    = nullptr;
+    QTimer *m_restoreTimer = nullptr;
+    QTimer *m_blinkTimer   = nullptr;
 
-  QNetworkAccessManager *m_networkManager = nullptr;
+    QNetworkAccessManager *m_networkManager = nullptr;
 
-  std::map<std::string, ServerRegion> m_regions;
+    std::map<std::string, ServerRegion> m_regions;
+    std::map<std::string, int> m_codeToRow;
 
-  std::atomic<int> m_pingVersion{0};
-  int m_pendingPings = 0;
-  bool m_isPaused = false;
-  bool m_isDownloading = false;
-  bool m_blinkState = false;
-  QString m_lastActionText;
+    std::atomic<int> m_pingVersion{0};
+    std::atomic<int> m_pendingPings{0};
 
-  bool m_isDragging = false;
-  QPoint m_dragPosition;
+    QThreadPool m_pingPool;
+
+    std::atomic<bool> m_isPaused{false};
+    std::atomic<bool> m_isDownloading{false};
+    std::atomic<bool> m_isDestroying{false};
+
+    bool    m_blinkState   = false;
+    QString m_lastActionText;
+
+    bool   m_isDragging   = false;
+    QPoint m_dragPosition;
 };
