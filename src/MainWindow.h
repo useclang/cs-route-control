@@ -5,14 +5,15 @@
 #include <QMouseEvent>
 #include <QNetworkAccessManager>
 #include <QPoint>
+#include <QPointer>
 #include <QPushButton>
 #include <QTableWidget>
 #include <QThreadPool>
 #include <QTimer>
 
 #include <atomic>
-#include <map>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 struct ServerRegion {
@@ -74,8 +75,8 @@ private:
 
     QNetworkAccessManager *m_networkManager = nullptr;
 
-    std::map<std::string, ServerRegion> m_regions;
-    std::map<std::string, int> m_codeToRow;
+    std::unordered_map<std::string, ServerRegion> m_regions;
+    std::unordered_map<std::string, int>          m_codeToRow;
 
     std::atomic<int> m_pingVersion{0};
     std::atomic<int> m_pendingPings{0};
@@ -86,7 +87,8 @@ private:
     std::atomic<bool> m_isDownloading{false};
     std::atomic<bool> m_isDestroying{false};
 
-    bool    m_blinkState   = false;
+    bool    m_blinkState        = false;
+    bool    m_warnedAboutAdmin  = false;
     QString m_lastActionText;
 
     bool   m_isDragging   = false;

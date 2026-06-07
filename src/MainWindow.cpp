@@ -17,8 +17,8 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
-static constexpr int kWindowW = 350;
-static constexpr int kWindowH = 420;
+static constexpr int kWindowW         = 350;
+static constexpr int kWindowH         = 420;
 static constexpr int kNetworkTimeoutMs = 10000;
 
 static const QString kStyleSheet = R"(
@@ -35,14 +35,14 @@ static const QString kStyleSheet = R"(
 )";
 
 static QColor pingColor(int ping) {
-    if (ping < 0) return QColor(128, 128, 128);
-    if (ping < 50) return QColor(0, 100, 0);
+    if (ping < 0)   return QColor(128, 128, 128);
+    if (ping < 50)  return QColor(0, 100, 0);
     if (ping < 100) return QColor(204, 204, 0);
     return QColor(139, 0, 0);
 }
 
 static QColor jitterColor(int jitter) {
-    if (jitter <= 5) return QColor(0, 100, 0);
+    if (jitter <= 5)  return QColor(0, 100, 0);
     if (jitter <= 15) return QColor(204, 204, 0);
     return QColor(139, 0, 0);
 }
@@ -71,7 +71,7 @@ MainWindow::~MainWindow() {
 
 void MainWindow::mousePressEvent(QMouseEvent *event) {
     if (event->button() == Qt::LeftButton) {
-        m_isDragging = true;
+        m_isDragging  = true;
         m_dragPosition = event->globalPosition().toPoint() - frameGeometry().topLeft();
         event->accept();
     }
@@ -112,14 +112,14 @@ void MainWindow::setupUI() {
     titleLayout->setSpacing(0);
 
     auto *titleLabel = new QLabel("CS Route Control", titleBar);
-    QFont titleFont = titleLabel->font();
+    QFont titleFont  = titleLabel->font();
     titleFont.setPointSize(9);
     titleLabel->setFont(titleFont);
     titleLabel->setStyleSheet("border: none; color: black; background: transparent;");
 
-    auto *minBtn = new MinButton(titleBar);
+    auto *minBtn   = new MinButton(titleBar);
     auto *closeBtn = new CloseButton(titleBar);
-    connect(minBtn, &QPushButton::clicked, this, &QWidget::showMinimized);
+    connect(minBtn,   &QPushButton::clicked, this, &QWidget::showMinimized);
     connect(closeBtn, &QPushButton::clicked, this, &QWidget::close);
 
     titleLayout->addWidget(titleLabel);
@@ -165,7 +165,7 @@ void MainWindow::setupUI() {
     leftBtnLayout->setContentsMargins(0, 0, 0, 0);
 
     m_resetButton = new QPushButton("Reset Firewall", central);
-    m_loadButton = new QPushButton("Reload Steam API", central);
+    m_loadButton  = new QPushButton("Reload Steam API", central);
     m_resetButton->setFixedSize(110, 26);
     m_loadButton->setFixedSize(110, 26);
 
@@ -198,9 +198,9 @@ void MainWindow::setupUI() {
     contentLayout->addWidget(m_statusLabel, 0);
     mainLayout->addLayout(contentLayout);
 
-    connect(m_loadButton, &QPushButton::clicked, this, &MainWindow::loadJson);
-    connect(m_resetButton, &QPushButton::clicked, this, &MainWindow::resetFilter);
-    connect(m_pauseButton, &QPushButton::clicked, this, &MainWindow::togglePause);
+    connect(m_loadButton,   &QPushButton::clicked, this, &MainWindow::loadJson);
+    connect(m_resetButton,  &QPushButton::clicked, this, &MainWindow::resetFilter);
+    connect(m_pauseButton,  &QPushButton::clicked, this, &MainWindow::togglePause);
 
     m_blinkTimer = new QTimer(this);
     m_blinkTimer->setInterval(600);
@@ -232,13 +232,12 @@ void MainWindow::restoreMonitoringStatus() {
 
 bool MainWindow::ensureAdmin() {
     if (!FirewallManager::isAdmin()) {
-        static bool warned = false;
-        if (!warned) {
+        if (!m_warnedAboutAdmin) {
             QMessageBox::critical(this, "Administrator required",
                                   "CS Route Control needs to be run as Administrator\n"
                                   "to add or remove Windows Firewall rules.\n\n"
                                   "Please restart the application with elevated privileges.");
-            warned = true;
+            m_warnedAboutAdmin = true;
         }
         return false;
     }
@@ -246,9 +245,10 @@ bool MainWindow::ensureAdmin() {
 }
 
 void MainWindow::togglePause() {
-    m_isPaused.store(!m_isPaused.load());
+    const bool nowPaused = !m_isPaused.load();
+    m_isPaused.store(nowPaused);
 
-    if (m_isPaused.load()) {
+    if (nowPaused) {
         m_pingTimer->stop();
         m_pauseButton->setText("Resume");
         if (m_lastActionText.isEmpty() && !m_isDownloading.load())
@@ -294,9 +294,10 @@ void MainWindow::parseServerList(const QByteArray &data) {
     const QJsonObject pops = doc.object().value("pops").toObject();
     m_regions.clear();
 
-    for (const QString &code : pops.keys()) {
-        const QJsonObject pop = pops.value(code).toObject();
-        const QJsonArray relays = pop.value("relays").toArray();
+    for (auto it = pops.constBegin(); it != pops.constEnd(); ++it) {
+        const QString    &code   = it.key();
+        const QJsonObject pop    = it.value().toObject();
+        const QJsonArray  relays = pop.value("relays").toArray();
         if (relays.isEmpty()) continue;
 
         ServerRegion region;
@@ -349,15 +350,17 @@ void MainWindow::populateTable() {
         cbLayout->addWidget(checkBox);
         m_table->setCellWidget(row, 3, cbWidget);
 
-        const bool savedState = settings.value(QString::fromStdString(region.name), false).toBool();
+        const QString regionCode = QString::fromStdString(code);
+        const QString regionName = QString::fromStdString(region.name);
+        const bool savedState    = settings.value(regionCode, false).toBool();
+
         checkBox->blockSignals(true);
         checkBox->setChecked(savedState);
         checkBox->blockSignals(false);
 
         const auto ips = std::make_shared<std::vector<std::string>>(region.ips);
-        const QString regionName = QString::fromStdString(region.name);
 
-        connect(checkBox, &QCheckBox::toggled, this, [this, ips, regionName](bool checked) {
+        connect(checkBox, &QCheckBox::toggled, this, [this, ips, regionCode, regionName](bool checked) {
             if (!ensureAdmin()) {
                 if (auto *cb = qobject_cast<QCheckBox *>(sender())) {
                     cb->blockSignals(true);
@@ -367,17 +370,19 @@ void MainWindow::populateTable() {
                 return;
             }
 
-            QThreadPool::globalInstance()->start([this, ips, checked, regionName]() {
+            QPointer<MainWindow> self(this);
+            QThreadPool::globalInstance()->start([self, ips, checked, regionCode, regionName]() {
                 bool success = true;
-                for (const auto &ip : *ips) {
+                for (const auto &ip : *ips)
                     success &= checked ? FirewallManager::addBlockRule(ip) : FirewallManager::removeBlockRule(ip);
-                }
 
-                QMetaObject::invokeMethod(this, [this, regionName, checked, success]() {
-                    if (m_isDestroying.load()) return;
+                QMetaObject::invokeMethod(self, [self, regionCode, regionName, checked, success]() {
+                    if (!self || self->m_isDestroying.load()) return;
                     QSettings cfg("CSRouteControl", "Settings");
-                    cfg.setValue(regionName, checked);
-                    showStatus(success ? (checked ? "Blocked: " : "Unblocked: ") + regionName : "Error modifying firewall rules!");
+                    cfg.setValue(regionCode, checked);
+                    self->showStatus(success
+                        ? (checked ? QStringLiteral("Blocked: ") : QStringLiteral("Unblocked: ")) + regionName
+                        : QStringLiteral("Error modifying firewall rules!"));
                 }, Qt::QueuedConnection);
             });
         });
@@ -416,7 +421,7 @@ void MainWindow::sortTableByPing() {
     m_codeToRow.clear();
     for (int r = 0; r < m_table->rowCount(); ++r) {
         if (auto *item = m_table->item(r, 0)) {
-            QString code = item->data(Qt::UserRole + 1).toString();
+            const QString code = item->data(Qt::UserRole + 1).toString();
             m_codeToRow[code.toStdString()] = r;
         }
     }
@@ -425,7 +430,7 @@ void MainWindow::sortTableByPing() {
 void MainWindow::refreshPings() {
     if (m_pendingPings.load() > 0 || m_isPaused.load()) return;
 
-    const int version = ++m_pingVersion;
+    const int version     = ++m_pingVersion;
     const int regionCount = static_cast<int>(m_regions.size());
 
     if (regionCount == 0) return;
@@ -435,25 +440,27 @@ void MainWindow::refreshPings() {
         const std::string codeCopy = code;
         const auto ips = std::make_shared<std::vector<std::string>>(region.ips);
 
-        m_pingPool.start([this, version, codeCopy, ips]() {
-            int rtt = -1;
+        QPointer<MainWindow> self(this);
+        m_pingPool.start([self, version, codeCopy, ips]() {
+            int rtt    = -1;
             int jitter = 0;
 
             for (const auto &ip : *ips) {
                 PingManager::PingResult res = PingManager::ping(ip, 4, 500);
-                rtt = res.avg;
+                rtt    = res.avg;
                 jitter = res.jitter;
                 if (rtt >= 0 && rtt < 2000) break;
             }
 
-            QMetaObject::invokeMethod(this, [this, version, codeCopy, rtt, jitter]() {
-                if (m_isDestroying.load() || version != getPingVersion()) return;
+            QMetaObject::invokeMethod(self, [self, version, codeCopy, rtt, jitter]() {
+                if (!self || self->m_isDestroying.load()) return;
+                if (version != self->getPingVersion()) return;
 
-                auto it = m_regions.find(codeCopy);
-                if (it != m_regions.end()) it->second.jitter = jitter;
+                auto it = self->m_regions.find(codeCopy);
+                if (it != self->m_regions.end()) it->second.jitter = jitter;
 
-                updatePingDisplay(codeCopy, rtt);
-                onPingFinished(version);
+                self->updatePingDisplay(codeCopy, rtt);
+                self->onPingFinished(version);
             }, Qt::QueuedConnection);
         });
     }
@@ -489,22 +496,27 @@ void MainWindow::updatePingDisplay(const std::string &code, int ping) {
 
 void MainWindow::onPingFinished(int version) {
     if (version != getPingVersion()) return;
-    if (m_pendingPings.fetch_sub(1) == 1)
-        sortTableByPing();
+    if (m_pendingPings.fetch_sub(1) == 1) {
+        QTimer::singleShot(0, this, [this, version]() {
+            if (version == getPingVersion())
+                sortTableByPing();
+        });
+    }
 }
 
 void MainWindow::resetFilter() {
     if (!ensureAdmin()) return;
 
-    QThreadPool::globalInstance()->start([this]() {
+    QPointer<MainWindow> self(this);
+    QThreadPool::globalInstance()->start([self]() {
         const bool ok = FirewallManager::removeAllRules();
 
-        QMetaObject::invokeMethod(this, [this, ok]() {
-            if (m_isDestroying.load()) return;
+        QMetaObject::invokeMethod(self, [self, ok]() {
+            if (!self || self->m_isDestroying.load()) return;
 
             QSettings cfg("CSRouteControl", "Settings");
-            for (int row = 0; row < m_table->rowCount(); ++row) {
-                QWidget *w = m_table->cellWidget(row, 3);
+            for (int row = 0; row < self->m_table->rowCount(); ++row) {
+                QWidget *w = self->m_table->cellWidget(row, 3);
                 if (!w) continue;
                 auto *cb = w->findChild<QCheckBox *>();
                 if (cb && cb->isChecked()) {
@@ -512,11 +524,13 @@ void MainWindow::resetFilter() {
                     cb->setChecked(false);
                     cb->blockSignals(false);
 
-                    if (auto *nameItem = m_table->item(row, 0))
-                        cfg.remove(nameItem->text());
+                    if (auto *nameItem = self->m_table->item(row, 0)) {
+                        const QString code = nameItem->data(Qt::UserRole + 1).toString();
+                        cfg.remove(code);
+                    }
                 }
             }
-            showStatus(ok ? "All firewall rules cleared." : "Some rules could not be removed.");
+            self->showStatus(ok ? "All firewall rules cleared." : "Some rules could not be removed.");
         }, Qt::QueuedConnection);
     });
 }

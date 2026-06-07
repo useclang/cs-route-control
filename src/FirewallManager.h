@@ -49,7 +49,7 @@ public:
         if (FAILED(CoCreateInstance(__uuidof(NetFwRule), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&rule))))
             return false;
 
-        std::wstring wIp = toWide(ip);
+        std::wstring wIp   = toWide(ip);
         std::wstring wName = L"CSR_Block_" + wIp;
 
         rule->put_Name(_bstr_t(wName.c_str()));
@@ -121,14 +121,14 @@ public:
 private:
     struct ComScope {
         ComScope() {
-            HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-            m_ok = SUCCEEDED(hr);
-            m_needUninit = SUCCEEDED(hr);
+            HRESULT hr  = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+            m_ok        = SUCCEEDED(hr);
+            m_needUninit = (hr == S_OK);
         }
         ~ComScope() { if (m_needUninit) CoUninitialize(); }
         bool ok() const { return m_ok; }
     private:
-        bool m_ok = false;
+        bool m_ok        = false;
         bool m_needUninit = false;
     };
 
