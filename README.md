@@ -2,7 +2,7 @@
 CS Route Control is a native Windows utility for managing Counter-Strike 2 matchmaking connections. It configures Windows Firewall outbound rules to block specific Steam Datagram Relay (SDR) regions, giving you full control over which servers you connect to. Built natively in C++17 and Qt6.
 
 <p align="center">
-  <img src="image.png" width="350"/>
+  <img src="docs/screenshots/ui.png" width="350"/>
 </p>
 
 ## Usage Instructions
@@ -14,7 +14,7 @@ CS Route Control is a native Windows utility for managing Counter-Strike 2 match
 5. Selection Mode: Isolate a single region instantly by using <kbd>Alt</kbd> + <kbd>Left Click</kbd> or <kbd>Middle Mouse Click</kbd> on a region, which automatically blocks all other available locations.
 
 <p align="center">
-  <img src="ingame.png" width="825"/>
+  <img src="docs/screenshots/ingame.png" width="833"/>
 </p>
 
 ## Building from Source
