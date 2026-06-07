@@ -1,6 +1,8 @@
 #include "MainWindow.h"
-#include "FirewallManager.h"
-#include "PingManager.h"
+#include "FirewallController.h"
+#include "PingScheduler.h"
+#include "RegionCache.h"
+#include "RegionTableModel.h"
 #include "TitleBarWidgets.h"
 
 #include <QApplication>
@@ -17,9 +19,10 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
-static constexpr int kWindowW         = 350;
-static constexpr int kWindowH         = 420;
+static constexpr int kWindowW          = 350;
+static constexpr int kWindowH          = 420;
 static constexpr int kNetworkTimeoutMs = 10000;
+static constexpr int kPingIntervalMs   = 2000;
 
 static const QString kStyleSheet = R"(
     QWidget#centralWidget { background-color: #f7f7f7; border: 1px solid #999999; }
@@ -30,48 +33,53 @@ static const QString kStyleSheet = R"(
     QHeaderView::section { background-color: #ffffff; color: black; border: none; border-bottom: 1px solid #ababab; border-right: 1px solid #e0e0e0; padding: 2px 4px; }
     QHeaderView::section:hover { background-color: #e5e5e5; }
     QHeaderView::section:pressed { background-color: #d4d4d4; }
-    QTableWidget { border: 1px solid #cccccc; background-color: #ffffff; }
-    QTableWidget::item { padding: 0px; margin: 0px; }
+    QTableView { border: 1px solid #cccccc; background-color: #ffffff; }
+    QTableView::item { padding: 0px; margin: 0px; }
 )";
 
-static QColor pingColor(int ping) {
-    if (ping < 0)   return QColor(128, 128, 128);
-    if (ping < 50)  return QColor(0, 100, 0);
-    if (ping < 100) return QColor(204, 204, 0);
-    return QColor(139, 0, 0);
-}
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow(parent)
+{
+    m_model    = new RegionTableModel(this);
+    m_proxy    = new QSortFilterProxyModel(this);
+    m_proxy->setSourceModel(m_model);
+    m_proxy->setSortRole(Qt::UserRole);
 
-static QColor jitterColor(int jitter) {
-    if (jitter <= 5)  return QColor(0, 100, 0);
-    if (jitter <= 15) return QColor(204, 204, 0);
-    return QColor(139, 0, 0);
-}
-
-MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_networkManager = new QNetworkAccessManager(this);
-    m_pingPool.setMaxThreadCount(qMax(4, QThread::idealThreadCount()));
+    m_pinger         = new PingScheduler(this);
+    m_firewall       = new FirewallController(this);
 
     setupUI();
+    connectSignals();
     ensureAdmin();
+
+    if (RegionCache::hasCache()) {
+        RegionTableModel::RegionMap cached;
+        if (RegionCache::load(cached)) {
+            m_model->setRegions(std::move(cached));
+            showStatus("Loaded from cache. Fetching update...");
+        }
+    }
+
     loadJson();
 
     m_pingTimer = new QTimer(this);
-    m_pingTimer->setInterval(2000);
-    connect(m_pingTimer, &QTimer::timeout, this, &MainWindow::refreshPings);
+    m_pingTimer->setInterval(kPingIntervalMs);
+    connect(m_pingTimer, &QTimer::timeout, this, [this]() {
+        if (!m_isPaused.load())
+            m_pinger->schedule(m_model->regions());
+    });
     m_pingTimer->start();
 }
 
 MainWindow::~MainWindow() {
-    m_isDestroying = true;
     m_pingTimer->stop();
-    ++m_pingVersion;
-    m_pingPool.clear();
-    m_pingPool.waitForDone();
+    m_pinger->cancel();
 }
 
 void MainWindow::mousePressEvent(QMouseEvent *event) {
     if (event->button() == Qt::LeftButton) {
-        m_isDragging  = true;
+        m_isDragging   = true;
         m_dragPosition = event->globalPosition().toPoint() - frameGeometry().topLeft();
         event->accept();
     }
@@ -87,6 +95,39 @@ void MainWindow::mouseMoveEvent(QMouseEvent *event) {
 void MainWindow::mouseReleaseEvent(QMouseEvent *event) {
     m_isDragging = false;
     QMainWindow::mouseReleaseEvent(event);
+}
+
+bool MainWindow::eventFilter(QObject *obj, QEvent *event) {
+    if (obj == m_tableView->viewport() && event->type() == QEvent::MouseButtonPress) {
+        auto *mouseEvent = static_cast<QMouseEvent*>(event);
+        const bool isAltLeft = (mouseEvent->button() == Qt::LeftButton && (mouseEvent->modifiers() & Qt::AltModifier));
+        const bool isMiddle  = (mouseEvent->button() == Qt::MiddleButton);
+
+        if (isAltLeft || isMiddle) {
+            QModelIndex proxyIndex = m_tableView->indexAt(mouseEvent->pos());
+            if (proxyIndex.isValid()) {
+                QString targetCode = m_proxy->data(m_proxy->index(proxyIndex.row(), RegionTableModel::ColName), Qt::UserRole + 1).toString();
+                if (!targetCode.isEmpty() && ensureAdmin()) {
+                    showStatus("Isolating region...");
+                    m_model->blockSignals(true);
+                    const auto &allRegions = m_model->regions();
+                    for (const auto &[code, region] : allRegions) {
+                        bool shouldBlock = (code != targetCode.toStdString());
+                        m_model->setBlocked(code, shouldBlock);
+                    }
+                    m_model->blockSignals(false);
+                    m_model->clearAllBlocked();
+                    for (const auto &[code, region] : allRegions) {
+                        bool shouldBlock = (code != targetCode.toStdString());
+                        m_model->setBlocked(code, shouldBlock);
+                    }
+                    showStatus("Isolated: " + m_proxy->data(m_proxy->index(proxyIndex.row(), RegionTableModel::ColName)).toString());
+                    return true;
+                }
+            }
+        }
+    }
+    return QMainWindow::eventFilter(obj, event);
 }
 
 void MainWindow::setupUI() {
@@ -133,28 +174,29 @@ void MainWindow::setupUI() {
     contentLayout->setContentsMargins(4, 2, 4, 0);
     contentLayout->setSpacing(4);
 
-    m_table = new QTableWidget(central);
-    m_table->setColumnCount(4);
-    m_table->setHorizontalHeaderLabels({"Region", "Ping", "Jitter", "Block"});
+    m_tableView = new QTableView(central);
+    m_tableView->setModel(m_proxy);
 
-    m_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
-    m_table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Fixed);
-    m_table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Fixed);
-    m_table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Fixed);
-    m_table->setColumnWidth(1, 55);
-    m_table->setColumnWidth(2, 55);
-    m_table->setColumnWidth(3, 45);
+    m_tableView->horizontalHeader()->setSectionResizeMode(RegionTableModel::ColName,   QHeaderView::Stretch);
+    m_tableView->horizontalHeader()->setSectionResizeMode(RegionTableModel::ColPing,   QHeaderView::Fixed);
+    m_tableView->horizontalHeader()->setSectionResizeMode(RegionTableModel::ColJitter, QHeaderView::Fixed);
+    m_tableView->horizontalHeader()->setSectionResizeMode(RegionTableModel::ColBlock,  QHeaderView::Fixed);
+    m_tableView->setColumnWidth(RegionTableModel::ColPing,   55);
+    m_tableView->setColumnWidth(RegionTableModel::ColJitter, 60);
+    m_tableView->setColumnWidth(RegionTableModel::ColBlock,  45);
 
-    m_table->setShowGrid(false);
-    m_table->setAlternatingRowColors(true);
-    m_table->verticalHeader()->setVisible(false);
-    m_table->verticalHeader()->setDefaultSectionSize(22);
-    m_table->horizontalHeader()->setFixedHeight(22);
-    m_table->setSortingEnabled(true);
-    m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_table->setSelectionMode(QAbstractItemView::NoSelection);
+    m_tableView->setShowGrid(false);
+    m_tableView->setAlternatingRowColors(true);
+    m_tableView->verticalHeader()->setVisible(false);
+    m_tableView->verticalHeader()->setDefaultSectionSize(22);
+    m_tableView->horizontalHeader()->setFixedHeight(22);
+    m_tableView->setSortingEnabled(true);
+    m_tableView->sortByColumn(RegionTableModel::ColPing, Qt::AscendingOrder);
+    m_tableView->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_tableView->setSelectionMode(QAbstractItemView::NoSelection);
+    m_tableView->viewport()->installEventFilter(this);
 
-    contentLayout->addWidget(m_table, 1);
+    contentLayout->addWidget(m_tableView, 1);
 
     auto *bottomLayout = new QHBoxLayout();
     bottomLayout->setContentsMargins(0, 0, 0, 0);
@@ -198,10 +240,6 @@ void MainWindow::setupUI() {
     contentLayout->addWidget(m_statusLabel, 0);
     mainLayout->addLayout(contentLayout);
 
-    connect(m_loadButton,   &QPushButton::clicked, this, &MainWindow::loadJson);
-    connect(m_resetButton,  &QPushButton::clicked, this, &MainWindow::resetFilter);
-    connect(m_pauseButton,  &QPushButton::clicked, this, &MainWindow::togglePause);
-
     m_blinkTimer = new QTimer(this);
     m_blinkTimer->setInterval(600);
     connect(m_blinkTimer, &QTimer::timeout, this, [this]() {
@@ -219,6 +257,52 @@ void MainWindow::setupUI() {
     });
 }
 
+void MainWindow::connectSignals() {
+    connect(m_loadButton,   &QPushButton::clicked, this, &MainWindow::loadJson);
+    connect(m_resetButton,  &QPushButton::clicked, this, &MainWindow::resetFilter);
+    connect(m_pauseButton,  &QPushButton::clicked, this, &MainWindow::togglePause);
+
+    connect(m_pinger, &PingScheduler::resultReady, this,
+            [this](PingScheduler::Result r) {
+                m_model->updatePingResult(r.code, r.avg, r.jitter);
+            });
+
+    connect(m_model, &RegionTableModel::blockToggled, this,
+            [this](std::string code, std::string name,
+                   std::vector<std::string> ips, bool blocked) {
+                if (!ensureAdmin()) {
+                    m_model->setBlocked(code, !blocked);
+                    return;
+                }
+                if (blocked)
+                    m_firewall->blockRegion(code, name, std::move(ips));
+                else
+                    m_firewall->unblockRegion(code, name, std::move(ips));
+            });
+
+    connect(m_firewall, &FirewallController::operationFinished, this,
+            [this](QString code, QString name, bool blocked, bool success) {
+                QSettings cfg("CSRouteControl", "Settings");
+                if (success) {
+                    cfg.setValue(code, blocked);
+                    showStatus((blocked ? QStringLiteral("Blocked: ")
+                                        : QStringLiteral("Unblocked: ")) + name);
+                } else {
+                    m_model->setBlocked(code.toStdString(), !blocked);
+                    showStatus(QStringLiteral("Error modifying firewall rules!"));
+                }
+            });
+
+    connect(m_firewall, &FirewallController::allRulesRemoved, this,
+            [this](bool ok) {
+                m_model->clearAllBlocked();
+                QSettings cfg("CSRouteControl", "Settings");
+                cfg.clear();
+                showStatus(ok ? "All firewall rules cleared."
+                              : "Some rules could not be removed.");
+            });
+}
+
 void MainWindow::showStatus(const QString &msg, int clearAfterMs) {
     m_lastActionText = msg;
     m_statusLabel->setText(msg);
@@ -227,16 +311,18 @@ void MainWindow::showStatus(const QString &msg, int clearAfterMs) {
 
 void MainWindow::restoreMonitoringStatus() {
     if (m_isDownloading.load()) return;
-    m_statusLabel->setText(m_isPaused.load() ? "Paused" : (m_blinkState ? "Monitoring..." : "Monitoring.."));
+    m_statusLabel->setText(m_isPaused.load()
+        ? "Paused"
+        : (m_blinkState ? "Monitoring..." : "Monitoring.."));
 }
 
 bool MainWindow::ensureAdmin() {
-    if (!FirewallManager::isAdmin()) {
+    if (!FirewallController::isAdmin()) {
         if (!m_warnedAboutAdmin) {
             QMessageBox::critical(this, "Administrator required",
-                                  "CS Route Control needs to be run as Administrator\n"
-                                  "to add or remove Windows Firewall rules.\n\n"
-                                  "Please restart the application with elevated privileges.");
+                "CS Route Control needs to be run as Administrator\n"
+                "to add or remove Windows Firewall rules.\n\n"
+                "Please restart the application with elevated privileges.");
             m_warnedAboutAdmin = true;
         }
         return false;
@@ -250,17 +336,17 @@ void MainWindow::togglePause() {
 
     if (nowPaused) {
         m_pingTimer->stop();
+        m_pinger->cancel();
         m_pauseButton->setText("Resume");
         if (m_lastActionText.isEmpty() && !m_isDownloading.load())
             m_statusLabel->setText("Paused");
     } else {
-        m_pingTimer->start();
+        m_pinger->cancel();
         m_pauseButton->setText("Pause");
         if (m_lastActionText.isEmpty() && !m_isDownloading.load())
             restoreMonitoringStatus();
-
-        ++m_pingVersion;
-        refreshPings();
+        m_pinger->schedule(m_model->regions());
+        m_pingTimer->start();
     }
 }
 
@@ -292,245 +378,49 @@ void MainWindow::parseServerList(const QByteArray &data) {
     }
 
     const QJsonObject pops = doc.object().value("pops").toObject();
-    m_regions.clear();
+    if (pops.isEmpty()) {
+        showStatus("No regions found in response");
+        return;
+    }
+
+    RegionTableModel::RegionMap regions;
+    QSettings settings("CSRouteControl", "Settings");
 
     for (auto it = pops.constBegin(); it != pops.constEnd(); ++it) {
-        const QString    &code   = it.key();
         const QJsonObject pop    = it.value().toObject();
         const QJsonArray  relays = pop.value("relays").toArray();
         if (relays.isEmpty()) continue;
 
         ServerRegion region;
-        region.code = code.toStdString();
-        region.name = pop.value("desc").toString(code).toStdString();
+        region.code = it.key().toStdString();
+        region.name = pop.value("desc").toString(it.key()).toStdString();
 
+        auto ips = std::make_shared<std::vector<std::string>>();
         for (const QJsonValue &relay : relays) {
             const QString ip = relay.toObject().value("ipv4").toString();
-            if (!ip.isEmpty()) region.ips.push_back(ip.toStdString());
+            if (!ip.isEmpty()) ips->push_back(ip.toStdString());
         }
 
-        if (!region.ips.empty()) m_regions[region.code] = std::move(region);
+        if (ips->empty()) continue;
+        region.ips = std::move(ips);
+        regions[region.code] = std::move(region);
     }
 
-    populateTable();
-    refreshPings();
-    showStatus(QString("Loaded %1 regions").arg(m_regions.size()));
-}
+    RegionCache::save(regions);
 
-void MainWindow::populateTable() {
-    m_table->setSortingEnabled(false);
-    clearTable();
-    m_table->setRowCount(static_cast<int>(m_regions.size()));
+    m_model->setRegions(std::move(regions));
 
-    QSettings settings("CSRouteControl", "Settings");
-    int row = 0;
-
-    for (auto &[code, region] : m_regions) {
-        m_codeToRow[code] = row;
-
-        auto *nameItem = new QTableWidgetItem(QString::fromStdString(region.name));
-        nameItem->setData(Qt::UserRole + 1, QString::fromStdString(code));
-        m_table->setItem(row, 0, nameItem);
-
-        auto *pingItem = new PingTableWidgetItem("...");
-        pingItem->setData(Qt::UserRole, 999999);
-        pingItem->setTextAlignment(Qt::AlignCenter);
-        m_table->setItem(row, 1, pingItem);
-
-        auto *jitterItem = new QTableWidgetItem("-");
-        jitterItem->setTextAlignment(Qt::AlignCenter);
-        m_table->setItem(row, 2, jitterItem);
-
-        auto *cbWidget = new QWidget(m_table);
-        auto *cbLayout = new QHBoxLayout(cbWidget);
-        cbLayout->setContentsMargins(0, 0, 0, 0);
-        cbLayout->setAlignment(Qt::AlignCenter);
-
-        auto *checkBox = new RegionCheckBox(cbWidget);
-        cbLayout->addWidget(checkBox);
-        m_table->setCellWidget(row, 3, cbWidget);
-
-        const QString regionCode = QString::fromStdString(code);
-        const QString regionName = QString::fromStdString(region.name);
-        const bool savedState    = settings.value(regionCode, false).toBool();
-
-        checkBox->blockSignals(true);
-        checkBox->setChecked(savedState);
-        checkBox->blockSignals(false);
-
-        const auto ips = std::make_shared<std::vector<std::string>>(region.ips);
-
-        connect(checkBox, &QCheckBox::toggled, this, [this, ips, regionCode, regionName](bool checked) {
-            if (!ensureAdmin()) {
-                if (auto *cb = qobject_cast<QCheckBox *>(sender())) {
-                    cb->blockSignals(true);
-                    cb->setChecked(!checked);
-                    cb->blockSignals(false);
-                }
-                return;
-            }
-
-            QPointer<MainWindow> self(this);
-            QThreadPool::globalInstance()->start([self, ips, checked, regionCode, regionName]() {
-                bool success = true;
-                for (const auto &ip : *ips)
-                    success &= checked ? FirewallManager::addBlockRule(ip) : FirewallManager::removeBlockRule(ip);
-
-                QMetaObject::invokeMethod(self, [self, regionCode, regionName, checked, success]() {
-                    if (!self || self->m_isDestroying.load()) return;
-                    QSettings cfg("CSRouteControl", "Settings");
-                    cfg.setValue(regionCode, checked);
-                    self->showStatus(success
-                        ? (checked ? QStringLiteral("Blocked: ") : QStringLiteral("Unblocked: ")) + regionName
-                        : QStringLiteral("Error modifying firewall rules!"));
-                }, Qt::QueuedConnection);
-            });
-        });
-
-        connect(checkBox, &RegionCheckBox::exclusiveToggleRequested, this, [this, checkBox, regionName]() {
-            if (!ensureAdmin()) return;
-            for (int r = 0; r < m_table->rowCount(); ++r) {
-                QWidget *w = m_table->cellWidget(r, 3);
-                if (!w) continue;
-                auto *cb = w->findChild<QCheckBox *>();
-                if (cb && cb->isChecked() != (cb != checkBox))
-                    cb->setChecked(cb != checkBox);
-            }
-            showStatus("Exclusive mode: " + regionName);
-        });
-
-        ++row;
+    for (const auto &[code, region] : m_model->regions()) {
+        const QString qCode = QString::fromStdString(code);
+        if (settings.value(qCode, false).toBool())
+            m_model->setBlocked(code, true);
     }
 
-    m_table->setSortingEnabled(true);
-}
-
-void MainWindow::clearTable() {
-    m_codeToRow.clear();
-    m_table->clearContents();
-    m_table->setRowCount(0);
-}
-
-void MainWindow::sortTableByPing() {
-    if (m_isPaused.load()) return;
-
-    m_table->setUpdatesEnabled(false);
-    m_table->sortItems(1, Qt::AscendingOrder);
-    m_table->setUpdatesEnabled(true);
-
-    m_codeToRow.clear();
-    for (int r = 0; r < m_table->rowCount(); ++r) {
-        if (auto *item = m_table->item(r, 0)) {
-            const QString code = item->data(Qt::UserRole + 1).toString();
-            m_codeToRow[code.toStdString()] = r;
-        }
-    }
-}
-
-void MainWindow::refreshPings() {
-    if (m_pendingPings.load() > 0 || m_isPaused.load()) return;
-
-    const int version     = ++m_pingVersion;
-    const int regionCount = static_cast<int>(m_regions.size());
-
-    if (regionCount == 0) return;
-    m_pendingPings.store(regionCount);
-
-    for (const auto &[code, region] : m_regions) {
-        const std::string codeCopy = code;
-        const auto ips = std::make_shared<std::vector<std::string>>(region.ips);
-
-        QPointer<MainWindow> self(this);
-        m_pingPool.start([self, version, codeCopy, ips]() {
-            int rtt    = -1;
-            int jitter = 0;
-
-            for (const auto &ip : *ips) {
-                PingManager::PingResult res = PingManager::ping(ip, 4, 500);
-                rtt    = res.avg;
-                jitter = res.jitter;
-                if (rtt >= 0 && rtt < 2000) break;
-            }
-
-            QMetaObject::invokeMethod(self, [self, version, codeCopy, rtt, jitter]() {
-                if (!self || self->m_isDestroying.load()) return;
-                if (version != self->getPingVersion()) return;
-
-                auto it = self->m_regions.find(codeCopy);
-                if (it != self->m_regions.end()) it->second.jitter = jitter;
-
-                self->updatePingDisplay(codeCopy, rtt);
-                self->onPingFinished(version);
-            }, Qt::QueuedConnection);
-        });
-    }
-}
-
-void MainWindow::updatePingDisplay(const std::string &code, int ping) {
-    auto it = m_regions.find(code);
-    if (it == m_regions.end()) return;
-
-    ServerRegion &region = it->second;
-    region.ping = ping;
-
-    const auto rowIt = m_codeToRow.find(code);
-    if (rowIt == m_codeToRow.end()) return;
-    const int row = rowIt->second;
-
-    if (auto *pingItem = m_table->item(row, 1)) {
-        pingItem->setText(ping >= 0 ? QString::number(ping) + " ms" : "Timeout");
-        pingItem->setData(Qt::UserRole, ping >= 0 ? ping : 999999);
-        pingItem->setForeground(pingColor(ping));
-    }
-
-    if (auto *jitterItem = m_table->item(row, 2)) {
-        if (ping >= 0) {
-            jitterItem->setText(QString::number(region.jitter) + " ms");
-            jitterItem->setForeground(jitterColor(region.jitter));
-        } else {
-            jitterItem->setText("-");
-            jitterItem->setForeground(QApplication::palette().text().color());
-        }
-    }
-}
-
-void MainWindow::onPingFinished(int version) {
-    if (version != getPingVersion()) return;
-    if (m_pendingPings.fetch_sub(1) == 1) {
-        QTimer::singleShot(0, this, [this, version]() {
-            if (version == getPingVersion())
-                sortTableByPing();
-        });
-    }
+    showStatus(QString("Loaded %1 regions").arg(m_model->rowCount()));
+    m_pinger->schedule(m_model->regions());
 }
 
 void MainWindow::resetFilter() {
     if (!ensureAdmin()) return;
-
-    QPointer<MainWindow> self(this);
-    QThreadPool::globalInstance()->start([self]() {
-        const bool ok = FirewallManager::removeAllRules();
-
-        QMetaObject::invokeMethod(self, [self, ok]() {
-            if (!self || self->m_isDestroying.load()) return;
-
-            QSettings cfg("CSRouteControl", "Settings");
-            for (int row = 0; row < self->m_table->rowCount(); ++row) {
-                QWidget *w = self->m_table->cellWidget(row, 3);
-                if (!w) continue;
-                auto *cb = w->findChild<QCheckBox *>();
-                if (cb && cb->isChecked()) {
-                    cb->blockSignals(true);
-                    cb->setChecked(false);
-                    cb->blockSignals(false);
-
-                    if (auto *nameItem = self->m_table->item(row, 0)) {
-                        const QString code = nameItem->data(Qt::UserRole + 1).toString();
-                        cfg.remove(code);
-                    }
-                }
-            }
-            self->showStatus(ok ? "All firewall rules cleared." : "Some rules could not be removed.");
-        }, Qt::QueuedConnection);
-    });
+    m_firewall->removeAllRules();
 }

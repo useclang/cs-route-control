@@ -1,28 +1,18 @@
 #pragma once
 
-#include <QLabel>
 #include <QMainWindow>
-#include <QMouseEvent>
+#include <QSortFilterProxyModel>
 #include <QNetworkAccessManager>
-#include <QPoint>
-#include <QPointer>
+#include <QLabel>
+#include <QTableView>
 #include <QPushButton>
-#include <QTableWidget>
-#include <QThreadPool>
 #include <QTimer>
-
+#include <QMouseEvent>
 #include <atomic>
-#include <string>
-#include <unordered_map>
-#include <vector>
 
-struct ServerRegion {
-    std::string              code;
-    std::string              name;
-    std::vector<std::string> ips;
-    int                      ping   = -1;
-    int                      jitter = 0;
-};
+class RegionTableModel;
+class PingScheduler;
+class FirewallController;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -31,66 +21,45 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override;
 
-    int getPingVersion() const {
-        return m_pingVersion.load(std::memory_order_relaxed);
-    }
-
-public slots:
-    void updatePingDisplay(const std::string &code, int ping);
-    void onPingFinished(int version);
-
 protected:
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
-
-private slots:
-    void loadJson();
-    void refreshPings();
-    void resetFilter();
-    void togglePause();
+    bool eventFilter(QObject *obj, QEvent *event) override;
 
 private:
     void setupUI();
-    void populateTable();
-    void clearTable();
-    void sortTableByPing();
-
+    void connectSignals();
+    bool ensureAdmin();
+    void togglePause();
+    void loadJson();
     void parseServerList(const QByteArray &data);
-
-    void showStatus(const QString &msg, int clearAfterMs = 5000);
+    void resetFilter();
+    void showStatus(const QString &msg, int clearAfterMs = 3000);
     void restoreMonitoringStatus();
 
-    bool ensureAdmin();
-
-    QTableWidget *m_table       = nullptr;
-    QPushButton  *m_loadButton  = nullptr;
-    QPushButton  *m_resetButton = nullptr;
-    QPushButton  *m_pauseButton = nullptr;
-    QLabel       *m_statusLabel = nullptr;
-
-    QTimer *m_pingTimer    = nullptr;
-    QTimer *m_restoreTimer = nullptr;
-    QTimer *m_blinkTimer   = nullptr;
-
+    RegionTableModel *m_model = nullptr;
+    QSortFilterProxyModel *m_proxy = nullptr;
     QNetworkAccessManager *m_networkManager = nullptr;
+    PingScheduler *m_pinger = nullptr;
+    FirewallController *m_firewall = nullptr;
 
-    std::unordered_map<std::string, ServerRegion> m_regions;
-    std::unordered_map<std::string, int>          m_codeToRow;
+    QTableView *m_tableView = nullptr;
+    QPushButton *m_resetButton = nullptr;
+    QPushButton *m_loadButton = nullptr;
+    QPushButton *m_pauseButton = nullptr;
+    QLabel *m_statusLabel = nullptr;
 
-    std::atomic<int> m_pingVersion{0};
-    std::atomic<int> m_pendingPings{0};
+    QTimer *m_pingTimer = nullptr;
+    QTimer *m_blinkTimer = nullptr;
+    QTimer *m_restoreTimer = nullptr;
 
-    QThreadPool m_pingPool;
+    bool m_isDragging = false;
+    QPoint m_dragPosition;
+    bool m_blinkState = false;
+    bool m_warnedAboutAdmin = false;
+    QString m_lastActionText;
 
     std::atomic<bool> m_isPaused{false};
     std::atomic<bool> m_isDownloading{false};
-    std::atomic<bool> m_isDestroying{false};
-
-    bool    m_blinkState        = false;
-    bool    m_warnedAboutAdmin  = false;
-    QString m_lastActionText;
-
-    bool   m_isDragging   = false;
-    QPoint m_dragPosition;
 };
