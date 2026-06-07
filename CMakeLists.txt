@@ -8,11 +8,18 @@ find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network)
 
 add_executable(route_control
     src/main.cpp
-    src/MainWindow.cpp
     src/MainWindow.h
-    src/FirewallManager.h
-    src/PingManager.h
+    src/MainWindow.cpp
     src/TitleBarWidgets.h
+    src/ServerRegion.h
+    src/RegionCache.h
+    src/RegionCache.cpp
+    src/PingScheduler.h
+    src/PingScheduler.cpp
+    src/FirewallController.h
+    src/FirewallController.cpp
+    src/RegionTableModel.h
+    src/RegionTableModel.cpp
 )
 
 target_link_libraries(route_control Qt6::Core Qt6::Widgets Qt6::Network)
